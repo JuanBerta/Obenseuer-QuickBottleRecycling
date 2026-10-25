@@ -78,17 +78,20 @@ namespace QuickBottleRecyclingMod
 			{
 				if (stack == null || stack.IsEmpty())
 				{
-					continue;
-				}
+                    Log.LogInfo("[QuickBottleRecycling] QuickInsert skipped: found null or empty stack in player inventory.");
+                    continue;
+                }
 				Item item = stack.itemReference.Item;
 				if (item == null)
 				{
-					continue;
-				}
+                    Log.LogInfo("[QuickBottleRecycling] QuickInsert skipped: found null item in player inventory.");
+                    continue;
+                }
 				object[] meta = stack.Meta ?? new object[0];
 				if (!IsEmptyBottle(stack, meta))
 				{
-					continue;
+					Log.LogInfo("[QuickBottleRecycling] Skipping non-empty bottle: " + item.Title);
+                    continue;
 				}
 				emptyBottles++;
 				if (!panel.Allowed(item, stack.itemAmount, stack.ownerId, meta, out _))
@@ -131,7 +134,14 @@ namespace QuickBottleRecyclingMod
 			return true;
 		}
 
-		// Add a clone of the "Get coins" button onto the recycling panel.
+				// Create the "Add Empty Bottles" button from scratch instead of cloning the
+		// original "Get coins" button. Cloning was abandoned after multiple rounds of
+		// runtime failures: the clone always carried some form of the vanilla persistent
+		// onClick (m_PersistentCalls -> BottleRecyclingPanelUI.GiveCoins ->
+		// BottleRecyclingPanel.RemoveMoney -> Money.instance.AddMoney), and even after
+		// destroying the Button component (3a9e742) the workflow stayed fragile.
+		// A brand new GameObject carries zero vanilla components/events, so there is no
+		// possible path from a click to the vanilla GiveCoins payout.
 		[HarmonyPatch(typeof(BottleRecyclingPanel), "Open")]
 		internal static class BottleRecyclingPanel_Open_Patch
 		{
@@ -153,79 +163,85 @@ namespace QuickBottleRecyclingMod
 					return;
 				}
 				Transform parent = template.transform.parent;
+				if (parent == null)
+				{
+					return;
+				}
 
-				// Find any previously created clone first. We do NOT keep a static reference
-				// across panels/scenes: the panel UI may be destroyed or deactivated between
-				// opens, and a stale static reference can point at a destroyed object.
-				GameObject existing = null;
-				if (parent != null)
-				{
-					Transform t = parent.Find(ButtonName);
-					if (t != null)
-					{
-						existing = t.gameObject;
-					}
-				}
-				if (existing != null && existing.activeInHierarchy)
-				{
-					return; // already visible on this panel
-				}
+				// Reuse the button if it already exists on this panel (same panel/scene).
+				Transform existing = parent.Find(ButtonName);
 				if (existing != null)
 				{
-					UnityEngine.Object.Destroy(existing);
+					if (existing.gameObject.activeInHierarchy)
+					{
+						return;
+					}
+					UnityEngine.Object.Destroy(existing.gameObject);
 				}
 
-				GameObject button = UnityEngine.Object.Instantiate(template, parent);
-				button.name = ButtonName;
+				// Build from scratch: a brand-new GameObject. No Instantiate of the
+				// vanilla button, no Button component, no persistent calls anywhere.
+				GameObject button = new GameObject(ButtonName, typeof(RectTransform));
+				button.transform.SetParent(parent, false);
+
+				RectTransform templateRt = template.GetComponent<RectTransform>();
 				RectTransform rt = button.GetComponent<RectTransform>();
-				if (rt != null)
+				if (templateRt != null)
 				{
-					Vector3 pos = rt.localPosition;
+					rt.sizeDelta = templateRt.sizeDelta;
+					rt.anchorMin = templateRt.anchorMin;
+					rt.anchorMax = templateRt.anchorMax;
+					rt.pivot = templateRt.pivot;
+					rt.localScale = templateRt.localScale;
+					Vector3 pos = templateRt.localPosition;
 					pos.y += 70f;
 					rt.localPosition = pos;
 				}
-				TextMeshProUGUI label = button.GetComponentInChildren<TextMeshProUGUI>();
-				if (label != null)
+
+				// Visual: Image copied visually only (sprite/color/type), raycastTarget on.
+				Image templateImg = template.GetComponent<Image>();
+				Image img = button.AddComponent<Image>();
+				img.raycastTarget = true;
+				if (templateImg != null)
 				{
-					label.text = "Add Empty Bottles";
+					img.sprite = templateImg.sprite;
+					img.color = templateImg.color;
+					img.type = templateImg.type;
+				}
+				else
+				{
+					img.color = new Color(0.2f, 0.2f, 0.2f, 0.8f);
 				}
 
-				// Make sure the clone is raycastable even if the template's Image had
-				// raycastTarget disabled (e.g. it was only used as a visual template).
-				Image img = button.GetComponent<Image>();
-				if (img != null)
+				// Visual: label text (fresh TextMeshProUGUI, style copied from template label).
+				TextMeshProUGUI templateLabel = template.GetComponentInChildren<TextMeshProUGUI>();
+				GameObject labelGo = new GameObject("Label", typeof(RectTransform));
+				labelGo.transform.SetParent(button.transform, false);
+				TextMeshProUGUI label = labelGo.AddComponent<TextMeshProUGUI>();
+				label.text = "Add Empty Bottles";
+				label.alignment = TextAlignmentOptions.Center;
+				label.raycastTarget = false;
+				if (templateLabel != null)
 				{
-					img.raycastTarget = true;
+					label.font = templateLabel.font;
+					label.fontSize = templateLabel.fontSize;
+					label.color = templateLabel.color;
 				}
+				RectTransform labelRt = labelGo.GetComponent<RectTransform>();
+				labelRt.anchorMin = Vector2.zero;
+				labelRt.anchorMax = Vector2.one;
+				labelRt.offsetMin = Vector2.zero;
+				labelRt.offsetMax = Vector2.zero;
 
-				Button btn = button.GetComponent<Button>();
-				if (btn != null)
-				{
-					// CRITICAL: the cloned "Get coins" button carries the original persistent onClick
-					// call (m_PersistentCalls -> GiveCoins) which reflection cleanup proved unable to
-					// fully neutralize at runtime. Previously we disabled the Button, but a disabled
-					// Button STILL implements IPointerClickHandler, so ExecuteEvents.GetEventHandler
-					// can still select it (it does not filter isActiveAndEnabled). That made the
-					// EventSystem record the disabled Button as the press handler while the release
-					// lookup picked the enabled ClickCatcher -> handler mismatch -> Unity logs
-					// "handler was null" and the click is never delivered. If both lookups returned
-					// the disabled Button, the click would be silently dropped by ShouldSendToComponent.
-					// DETERMINISTIC FIX: destroy the original Button component entirely. Only the
-					// Image (raycastTarget forced true) and our ClickCatcher remain on the object,
-					// so the sole IPointerClickHandler is ClickCatcher: press and release always
-					// resolve to the same handler, and the original GiveCoins persistent callback
-					// (which lived on the destroyed Button) can never fire again.
-					UnityEngine.Object.Destroy(btn);
-					if (button.GetComponent<ClickCatcher>() == null)
-					{
-						button.AddComponent<ClickCatcher>();
-					}
-					Log.LogInfo("[QuickBottleRecycling] Clone button ready: original Button destroyed, Image raycastTarget on, ClickCatcher attached.");
-				}
+				// Click handling: sole handler is ClickCatcher (IPointerClickHandler).
+				// No Button component exists on this object, so EventSystem press/release
+				// always resolve to ClickCatcher and the vanilla GiveCoins path is unreachable.
+				button.AddComponent<ClickCatcher>();
+				Log.LogInfo("[QuickBottleRecycling] AddEmptyBottles button built from scratch: no vanilla Button/event copied, ClickCatcher attached.");
 			}
 		}
 
-		// EventSystem click handler attached to the cloned button. Routes the click to QuickInsert()
+// EventSystem click handler attached to the cloned button. Routes the click to QuickInsert()
 		// without touching UnityEvent reflection.
 		public class ClickCatcher : MonoBehaviour, IPointerClickHandler
 		{
