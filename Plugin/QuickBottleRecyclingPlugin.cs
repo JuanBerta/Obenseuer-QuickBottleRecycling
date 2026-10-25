@@ -204,34 +204,25 @@ namespace QuickBottleRecyclingMod
 				if (btn != null)
 				{
 					// CRITICAL: the cloned "Get coins" button carries the original persistent onClick
-					// call (m_PersistentCalls -> GiveCoins). RemoveAllListeners() only clears runtime
-					// listeners, NOT the serialized persistent calls, so without clearing those the
-					// button would directly pay out the machine money. Clear them via reflection.
-					object clickEvent = Traverse.Create(btn).Property("onClick").GetValue();
-					if (clickEvent != null)
-					{
-						object persistentCalls = Traverse.Create(clickEvent).Field("m_PersistentCalls").GetValue();
-						if (persistentCalls != null)
-						{
-							Traverse.Create(persistentCalls).Method("Clear").GetValue();
-						}
-						Traverse.Create(clickEvent).Method("RemoveAllListeners").GetValue();
-					}
-					// CRITICAL (fc89c90 follow-up): the persistent-call cleanup above proved
-					// unreliable at runtime (user still got paid directly on click). Disable the
-					// Button component entirely: EventSystem only dispatches pointer events to
-					// isActiveAndEnabled handlers, so a disabled Button never runs its onClick
-					// (and therefore can never fire the original persistent GiveCoins). The clone
-					// keeps the Button only as a visual template; ClickCatcher is the sole handler.
-					btn.enabled = false;
-					// Use an EventSystem IPointerClickHandler instead of reflecting AddListener into
-					// UnityAction (which is unreliable in the game's Mono runtime). The Button
-					// component stays for visuals, but its onClick is now fully empty and inert.
+					// call (m_PersistentCalls -> GiveCoins) which reflection cleanup proved unable to
+					// fully neutralize at runtime. Previously we disabled the Button, but a disabled
+					// Button STILL implements IPointerClickHandler, so ExecuteEvents.GetEventHandler
+					// can still select it (it does not filter isActiveAndEnabled). That made the
+					// EventSystem record the disabled Button as the press handler while the release
+					// lookup picked the enabled ClickCatcher -> handler mismatch -> Unity logs
+					// "handler was null" and the click is never delivered. If both lookups returned
+					// the disabled Button, the click would be silently dropped by ShouldSendToComponent.
+					// DETERMINISTIC FIX: destroy the original Button component entirely. Only the
+					// Image (raycastTarget forced true) and our ClickCatcher remain on the object,
+					// so the sole IPointerClickHandler is ClickCatcher: press and release always
+					// resolve to the same handler, and the original GiveCoins persistent callback
+					// (which lived on the destroyed Button) can never fire again.
+					UnityEngine.Object.Destroy(btn);
 					if (button.GetComponent<ClickCatcher>() == null)
 					{
 						button.AddComponent<ClickCatcher>();
 					}
-					Log.LogInfo("[QuickBottleRecycling] Clone button ready: persistent calls cleared, Button disabled, ClickCatcher attached.");
+					Log.LogInfo("[QuickBottleRecycling] Clone button ready: original Button destroyed, Image raycastTarget on, ClickCatcher attached.");
 				}
 			}
 		}
