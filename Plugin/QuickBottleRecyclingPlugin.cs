@@ -2,8 +2,6 @@
 using System.Collections.Generic;
 using BepInEx;
 using BepInEx.Configuration;
-using BepInEx.Unity.Mono;
-using BepInEx.Unity.Mono.Configuration;
 using HarmonyLib;
 using OS.Items;
 using TMPro;
