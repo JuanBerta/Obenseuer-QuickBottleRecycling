@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using BepInEx;
 using BepInEx.Configuration;
@@ -18,14 +18,15 @@ namespace QuickBottleRecyclingMod
 	{
 		internal static ConfigEntry<KeyboardShortcut> QuickInsertKey;
 		internal static ConfigEntry<bool> AddPanelButton;
-		private static GameObject cachedButton;
+		internal static BepInEx.Logging.ManualLogSource Log;
 
 		private void Awake()
 		{
+			Log = Logger;
 			QuickInsertKey = Config.Bind("General", "QuickInsertKey", new KeyboardShortcut(KeyCode.F8), "Quickly insert all empty compatible bottles from the backpack into the open recycling machine.");
 			AddPanelButton = Config.Bind("General", "AddPanelButton", true, "Add an 'Add Empty Bottles' button to the bottle recycling machine panel.");
 			Harmony.CreateAndPatchAll(typeof(BottleRecyclingPanel_Open_Patch));
-			Logger.LogInfo("Quick Bottle Recycling loaded.");
+			Log.LogInfo("Quick Bottle Recycling loaded.");
 		}
 
 		private void Update()
@@ -35,7 +36,7 @@ namespace QuickBottleRecyclingMod
 				int n = QuickInsert();
 				if (n > 0)
 				{
-					Logger.LogInfo("Quick recycle: inserted " + n + " bottle stack(s).");
+					Log.LogInfo("Quick recycle: inserted " + n + " bottle stack(s).");
 				}
 			}
 		}
@@ -45,19 +46,35 @@ namespace QuickBottleRecyclingMod
 		public static int QuickInsert()
 		{
 			BottleRecyclingPanel panel = BottleRecyclingPanel.instance;
-			if (panel == null || !panel.open || panel.currentBottleRecycling == null)
+			if (panel == null)
 			{
+				Log.LogWarning("[QuickBottleRecycling] QuickInsert skipped: no BottleRecyclingPanel instance.");
+				return 0;
+			}
+			if (!panel.open)
+			{
+				Log.LogWarning("[QuickBottleRecycling] QuickInsert skipped: panel is not open.");
+				return 0;
+			}
+			if (panel.currentBottleRecycling == null)
+			{
+				Log.LogWarning("[QuickBottleRecycling] QuickInsert skipped: currentBottleRecycling is null.");
 				return 0;
 			}
 			if (Inventory.instance == null)
 			{
+				Log.LogWarning("[QuickBottleRecycling] QuickInsert skipped: no Inventory instance.");
 				return 0;
 			}
 			List<ItemStack> stacks = Inventory.instance.GetPlayerItems();
 			if (stacks == null)
 			{
+				Log.LogWarning("[QuickBottleRecycling] QuickInsert skipped: GetPlayerItems() returned null.");
 				return 0;
 			}
+
+			int emptyBottles = 0;
+			int allowedBottles = 0;
 			int inserted = 0;
 			foreach (ItemStack stack in stacks)
 			{
@@ -75,14 +92,21 @@ namespace QuickBottleRecyclingMod
 				{
 					continue;
 				}
+				emptyBottles++;
 				if (!panel.Allowed(item, stack.itemAmount, stack.ownerId, meta, out _))
 				{
+					Log.LogInfo("[QuickBottleRecycling] Machine does not accept: " + item.Title);
 					continue;
 				}
+				allowedBottles++;
 				if (panel.HandleInsertedItem(item, stack.itemAmount, stack.ownerId, meta))
 				{
 					stack.RemoveItemAmount(stack.itemAmount);
 					inserted++;
+				}
+				else
+				{
+					Log.LogWarning("[QuickBottleRecycling] HandleInsertedItem returned false for: " + item.Title);
 				}
 			}
 			if (inserted > 0)
@@ -93,6 +117,7 @@ namespace QuickBottleRecyclingMod
 					panel.recyclingPanelUI.bottleSumText.text = panel.currentBottleRecycling.bottleRecyclingMoney.ToString("D6");
 				}
 			}
+			Log.LogInfo("[QuickBottleRecycling] QuickInsert done: empty=" + emptyBottles + " allowed=" + allowedBottles + " inserted=" + inserted + ".");
 			return inserted;
 		}
 
@@ -111,6 +136,8 @@ namespace QuickBottleRecyclingMod
 		[HarmonyPatch(typeof(BottleRecyclingPanel), "Open")]
 		internal static class BottleRecyclingPanel_Open_Patch
 		{
+			private const string ButtonName = "QuickBottleRecycling_AddEmptyBottles";
+
 			internal static void Postfix(BottleRecyclingPanel __instance)
 			{
 				if (!AddPanelButton.Value)
@@ -126,29 +153,53 @@ namespace QuickBottleRecyclingMod
 				{
 					return;
 				}
-				if (cachedButton != null && cachedButton.activeInHierarchy)
+				Transform parent = template.transform.parent;
+
+				// Find any previously created clone first. We do NOT keep a static reference
+				// across panels/scenes: the panel UI may be destroyed or deactivated between
+				// opens, and a stale static reference can point at a destroyed object.
+				GameObject existing = null;
+				if (parent != null)
 				{
-					return;
+					Transform t = parent.Find(ButtonName);
+					if (t != null)
+					{
+						existing = t.gameObject;
+					}
 				}
-				if (cachedButton != null)
+				if (existing != null && existing.activeInHierarchy)
 				{
-					UnityEngine.Object.Destroy(cachedButton);
+					return; // already visible on this panel
 				}
-				cachedButton = UnityEngine.Object.Instantiate(template, template.transform.parent);
-				cachedButton.name = "QuickBottleRecycling_AddEmptyBottles";
-				RectTransform rt = cachedButton.GetComponent<RectTransform>();
+				if (existing != null)
+				{
+					UnityEngine.Object.Destroy(existing);
+				}
+
+				GameObject button = UnityEngine.Object.Instantiate(template, parent);
+				button.name = ButtonName;
+				RectTransform rt = button.GetComponent<RectTransform>();
 				if (rt != null)
 				{
 					Vector3 pos = rt.localPosition;
 					pos.y += 70f;
 					rt.localPosition = pos;
 				}
-				TextMeshProUGUI label = cachedButton.GetComponentInChildren<TextMeshProUGUI>();
+				TextMeshProUGUI label = button.GetComponentInChildren<TextMeshProUGUI>();
 				if (label != null)
 				{
 					label.text = "Add Empty Bottles";
 				}
-				Button btn = cachedButton.GetComponent<Button>();
+
+				// Make sure the clone is raycastable even if the template's Image had
+				// raycastTarget disabled (e.g. it was only used as a visual template).
+				Image img = button.GetComponent<Image>();
+				if (img != null)
+				{
+					img.raycastTarget = true;
+				}
+
+				Button btn = button.GetComponent<Button>();
 				if (btn != null)
 				{
 					// CRITICAL: the cloned "Get coins" button carries the original persistent onClick
@@ -168,9 +219,9 @@ namespace QuickBottleRecyclingMod
 					// Use an EventSystem IPointerClickHandler instead of reflecting AddListener into
 					// UnityAction (which is unreliable in the game's Mono runtime). The Button
 					// component stays for visuals, but its onClick is now fully empty.
-					if (cachedButton.GetComponent<ClickCatcher>() == null)
+					if (button.GetComponent<ClickCatcher>() == null)
 					{
-						cachedButton.AddComponent<ClickCatcher>();
+						button.AddComponent<ClickCatcher>();
 					}
 				}
 			}
@@ -182,8 +233,10 @@ namespace QuickBottleRecyclingMod
 		{
 			public void OnPointerClick(PointerEventData eventData)
 			{
-				QuickInsert();
+				int n = QuickInsert();
+				Log.LogInfo("[QuickBottleRecycling] Add Empty Bottles clicked; inserted " + n + " stack(s).");
 			}
 		}
 	}
 }
+
