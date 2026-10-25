@@ -8,6 +8,7 @@ using HarmonyLib;
 using OS.Items;
 using TMPro;
 using UnityEngine;
+using UnityEngine.EventSystems;
 using UnityEngine.UI;
 
 namespace QuickBottleRecyclingMod
@@ -150,25 +151,39 @@ namespace QuickBottleRecyclingMod
 				Button btn = cachedButton.GetComponent<Button>();
 				if (btn != null)
 				{
-					// onClick is accessed via reflection to stay compatible with the exact UnityEngine.UI build shipped with the game.
+					// CRITICAL: the cloned "Get coins" button carries the original persistent onClick
+					// call (m_PersistentCalls -> GiveCoins). RemoveAllListeners() only clears runtime
+					// listeners, NOT the serialized persistent calls, so without clearing those the
+					// button would directly pay out the machine money. Clear them via reflection.
 					object clickEvent = Traverse.Create(btn).Property("onClick").GetValue();
 					if (clickEvent != null)
 					{
-						Traverse.Create(clickEvent).Method("RemoveAllListeners").GetValue();
-						Type actionType = Type.GetType("UnityEngine.Events.UnityAction, UnityEngine.CoreModule");
-						if (actionType != null)
+						object persistentCalls = Traverse.Create(clickEvent).Field("m_PersistentCalls").GetValue();
+						if (persistentCalls != null)
 						{
-							Delegate handler = Delegate.CreateDelegate(actionType, typeof(QuickBottleRecyclingPlugin), "OnAddEmptyBottlesClick");
-							Traverse.Create(clickEvent).Method("AddListener", handler).GetValue();
+							Traverse.Create(persistentCalls).Method("Clear").GetValue();
 						}
+						Traverse.Create(clickEvent).Method("RemoveAllListeners").GetValue();
+					}
+					// Use an EventSystem IPointerClickHandler instead of reflecting AddListener into
+					// UnityAction (which is unreliable in the game's Mono runtime). The Button
+					// component stays for visuals, but its onClick is now fully empty.
+					if (cachedButton.GetComponent<ClickCatcher>() == null)
+					{
+						cachedButton.AddComponent<ClickCatcher>();
 					}
 				}
 			}
 		}
 
-		public static void OnAddEmptyBottlesClick()
+		// EventSystem click handler attached to the cloned button. Routes the click to QuickInsert()
+		// without touching UnityEvent reflection.
+		public class ClickCatcher : MonoBehaviour, IPointerClickHandler
 		{
-			QuickInsert();
+			public void OnPointerClick(PointerEventData eventData)
+			{
+				QuickInsert();
+			}
 		}
 	}
 }
