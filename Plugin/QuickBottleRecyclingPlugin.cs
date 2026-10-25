@@ -103,6 +103,7 @@ namespace QuickBottleRecyclingMod
 				{
 					stack.RemoveItemAmount(stack.itemAmount);
 					inserted++;
+					Log.LogInfo("[QuickBottleRecycling] Inserted stack: " + item.Title + " x" + stack.itemAmount + " (machine money now " + panel.currentBottleRecycling.bottleRecyclingMoney + ").");
 				}
 				else
 				{
@@ -216,13 +217,21 @@ namespace QuickBottleRecyclingMod
 						}
 						Traverse.Create(clickEvent).Method("RemoveAllListeners").GetValue();
 					}
+					// CRITICAL (fc89c90 follow-up): the persistent-call cleanup above proved
+					// unreliable at runtime (user still got paid directly on click). Disable the
+					// Button component entirely: EventSystem only dispatches pointer events to
+					// isActiveAndEnabled handlers, so a disabled Button never runs its onClick
+					// (and therefore can never fire the original persistent GiveCoins). The clone
+					// keeps the Button only as a visual template; ClickCatcher is the sole handler.
+					btn.enabled = false;
 					// Use an EventSystem IPointerClickHandler instead of reflecting AddListener into
 					// UnityAction (which is unreliable in the game's Mono runtime). The Button
-					// component stays for visuals, but its onClick is now fully empty.
+					// component stays for visuals, but its onClick is now fully empty and inert.
 					if (button.GetComponent<ClickCatcher>() == null)
 					{
 						button.AddComponent<ClickCatcher>();
 					}
+					Log.LogInfo("[QuickBottleRecycling] Clone button ready: persistent calls cleared, Button disabled, ClickCatcher attached.");
 				}
 			}
 		}
